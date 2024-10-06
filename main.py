@@ -92,7 +92,7 @@ application_path = 'data/application.pkl'
 dir = 'data/'
 
 # Data Paths and Directories
-model = YOLO("yolo-Weights/yolov8n.pt")
+model = YOLO("yolo_weights/yolov8n.pt")
 
 # Clear ALL pickle files
 # ---------- USE WITH CAUTION -----------
