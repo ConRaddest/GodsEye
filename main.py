@@ -3,31 +3,18 @@ import time
 import pickle
 import cv2
 from datetime import datetime
-import numpy as np
-import base64
-import signal
-import time
 import face_recognition
 import threading
 import asyncio
-import cv2
-import numpy as np
-from fastapi import Response
-from nicegui import Client, app, core, run, ui
+from nicegui import ui
 import requests
-from multiprocessing import Manager, Queue
-import cv2
 from ultralytics import YOLO
-import numpy as np
-import face_recognition
 from cvzone import FaceDetectionModule
 from collections import Counter
-import pickle
-import asyncio
-import concurrent.futures
-import threading
-face_detector = FaceDetectionModule.FaceDetector()
 import os
+
+face_detector = FaceDetectionModule.FaceDetector()
+
 
 # Classes for various tables
 class User:
@@ -108,6 +95,28 @@ def preprocess_personas():
         global_all_usernames.extend([persona.username] * len(persona.face_encodings))
         global_all_known_encodings.extend([inner_array[0] for inner_array in persona.face_encodings])
         
+def update_led_status_all(led_status):
+    # -1 -> Turn Off Flash
+    # 0 -> Turn On Flash
+
+    # 1 -> Turn Lighting to Dim
+    # 2 -> Turn Lighting to Normal
+    # 3 -> Turn Lighting to Bright/Bright
+
+    ip_addresses = []
+    for camera in global_cameras:
+        ip_addresses.append(camera.ip_address)
+    
+    urls = [f"http://{ip_address}/control?led={led_status}" for ip_address in ip_addresses]
+    
+    for url in urls:
+        try:
+            response = requests.get(url, timeout=1)
+            if response.status_code != 200:
+                print(f"Error: Received response code {response.status_code}")
+        except requests.exceptions.RequestException as e:
+            print(f"Request failed: {e}")
+
 def __init__():
     global global_users
     global global_personas
@@ -148,6 +157,7 @@ def __init__():
     global_current_temperature = global_application_data['preferred_temperature']
 
     preprocess_personas()
+    update_led_status_all(global_current_lighting)
 
 __init__()
 
@@ -229,6 +239,17 @@ def detect_number_bodies(frame):
 
     return number_bodies
 
+# Returns the visible number of bodies
+def detect_number_faces(frame):
+    number_faces = 0
+    faces = face_detector.findFaces(frame, draw=False)[1]
+
+    for face in faces:
+        if face['score'][0] > global_application_data['face_detection_confidence_level']:
+            number_faces += 1
+
+    return number_faces
+
 def update_led_status(led_status, ip_address):
     # -1 -> Turn Off Flash
     # 0 -> Turn On Flash
@@ -245,27 +266,7 @@ def update_led_status(led_status, ip_address):
     except requests.exceptions.RequestException as e:
         print(f"Request failed: {e}")
 
-def update_led_status_all(led_status):
-    # -1 -> Turn Off Flash
-    # 0 -> Turn On Flash
 
-    # 1 -> Turn Lighting to Dim
-    # 2 -> Turn Lighting to Normal
-    # 3 -> Turn Lighting to Bright/Bright
-
-    ip_addresses = []
-    for camera in global_cameras:
-        ip_addresses.append(camera.ip_address)
-    
-    urls = [f"http://{ip_address}/control?led={led_status}" for ip_address in ip_addresses]
-    
-    for url in urls:
-        try:
-            response = requests.get(url, timeout=1)
-            if response.status_code != 200:
-                print(f"Error: Received response code {response.status_code}")
-        except requests.exceptions.RequestException as e:
-            print(f"Request failed: {e}")
 
 def handle_persona_add(face_encodings):
     global global_personas, global_logged_in_user, global_users
@@ -558,13 +559,17 @@ def dashboard_page():
 
             # Calculated Variables
             number_bodies = []
+            number_faces = []
             present_usernames = []
 
             average_number_bodies = 0
-            prev_average_number_bodies = 0
+            average_number_faces = 0
+
+            average_number_people = 0
+            prev_average_number_people = 0
 
             # Flags
-            avg_num_bodies_changed = False
+            average_number_people_changed = False
             unknown_resident_present = False
             
             if global_webcam_debug_mode:
@@ -581,25 +586,31 @@ def dashboard_page():
                     
                     # Detecting how many people and faces in the room
                     number_bodies.append(detect_number_bodies(frame))
+                    number_faces.append(detect_number_faces(frame))
                     
                     if frame_counter % global_application_data['frame_buffer_size'] == 0:
                         # Calculating average # people in the room
                         average_number_bodies = round(sum(number_bodies)/len(number_bodies))
-                        # Resetting Buffer
+                        average_number_faces = round(sum(number_faces)/len(number_faces))
+
+                        average_number_people = max(average_number_bodies, average_number_faces)
+
+                        # Resetting Buffers
                         number_bodies = []
+                        number_faces = []
                         
                         # Number of people has changed and someone is inside the room    
-                        if (prev_average_number_bodies != average_number_bodies) and (average_number_bodies != 0):
-                            avg_num_bodies_changed = True
+                        if (prev_average_number_people != average_number_people) and (average_number_people != 0):
+                            average_number_people_changed = True
                             present_usernames = []
 
                         # No one is inside the room, resetting alles after exit delay
-                        if average_number_bodies == 0:
+                        if average_number_people == 0:
                             exit_delay_counter += 1
 
                         # No one is inside the room, resetting alles
                         if exit_delay_counter > global_application_data['zero_person_detection_interval_delay']:
-                            avg_num_bodies_changed = False
+                            average_number_people_changed = False
                             present_usernames = []
                             guest_recheck_counter = 0
                             unknown_resident_present = False
@@ -607,17 +618,17 @@ def dashboard_page():
                             exit_delay_counter = 0
 
                         # Updating Tracker
-                        prev_average_number_bodies = average_number_bodies 
+                        prev_average_number_people = average_number_people 
 
                         # ------------- Logging for Debugging ---------------
-                        print('Avg # People: ', average_number_bodies)
+                        print('Avg # People: ', average_number_people)
                         print('Present Usernames: ', present_usernames)
 
-                        if avg_num_bodies_changed: print('Avg # People Changed!')
+                        if average_number_people_changed: print('Avg # People Changed!')
                         if unknown_resident_present: print("Unknown Resident Present!") 
 
                     # ----------------- If number of people have changed, or if there is an unknown present ------------------
-                    if (avg_num_bodies_changed and frame_counter % global_application_data['frame_buffer_size'] == 0 
+                    if (average_number_people_changed and frame_counter % global_application_data['frame_buffer_size'] == 0 
                         or (unknown_resident_present
                         and frame_counter % global_application_data['frame_buffer_size'] == 0 
                         and guest_recheck_counter < global_application_data['guest_recheck_threshold'])):
@@ -627,20 +638,20 @@ def dashboard_page():
                         unique_present_usernames = list(set(present_usernames + usernames_in_frame))
                         known_usernames_in_present_list = [username for username in unique_present_usernames if username != "Unknown"]
 
-                        if len(known_usernames_in_present_list) == average_number_bodies: 
+                        if len(known_usernames_in_present_list) == average_number_people: 
                             # --- Everyone has been identified ---
                             unique_present_usernames = known_usernames_in_present_list
                             unknown_resident_present = False
-                            avg_num_bodies_changed = False
+                            average_number_people_changed = False
                             exit_delay_counter = 0
             
-                        elif len(known_usernames_in_present_list) < average_number_bodies:
+                        elif len(known_usernames_in_present_list) < average_number_people:
                             # --- There is still people we do not know ---
                             unique_present_usernames = known_usernames_in_present_list
-                            while len(unique_present_usernames) < average_number_bodies:
+                            while len(unique_present_usernames) < average_number_people:
                                 unique_present_usernames.append('Unknown')
 
-                            avg_num_bodies_changed = False
+                            average_number_people_changed = False
                             unknown_resident_present = True
                             guest_recheck_counter += 1
                             exit_delay_counter = 0
@@ -660,13 +671,22 @@ def dashboard_page():
             # Calculated Variables
             number_bodies1 = []
             number_bodies2 = []
-            present_usernames = []
+
+            number_faces1 = []
+            number_faces2 = []
 
             average_number_bodies = 0
-            prev_average_number_bodies = 0
+            average_number_faces = 0
+
+            average_number_people = 0
+
+            present_usernames = []
+
+            average_number_people = 0
+            prev_average_number_people = 0
 
             # Flags
-            avg_num_bodies_changed = False
+            average_number_people_changed = False
             unknown_resident_present = False
 
             video1 = cv2.VideoCapture('http://' + ip_addresses[0] + ':81')
@@ -681,31 +701,45 @@ def dashboard_page():
                     frame_counter += 1
                     # Detecting how many people are in the room
                     number_bodies1.append(detect_number_bodies(frame1))
-                    number_bodies2.append(detect_number_bodies(frame1))
+                    number_bodies2.append(detect_number_bodies(frame2))
 
-                    # number_faces = detect_number_faces(frame)
+                    number_faces1.append(detect_number_faces(frame1))
+                    number_faces2.append(detect_number_faces(frame2))
                     
                     if frame_counter % global_application_data['frame_buffer_size'] == 0:
-                        # Calculating average # people in the room, taking maximum from each average
+                        # calculating average number of bodies in the room
                         average_number_bodies1 = round(sum(number_bodies1)/len(number_bodies1))
-                        average_number_bodies2 = round(sum(number_bodies1)/len(number_bodies1))           
-                        average_number_bodies = max([average_number_bodies1, average_number_bodies2])
+                        average_number_bodies2 = round(sum(number_bodies1)/len(number_bodies1)) 
 
-                        # Resetting Buffer
+                        average_number_bodies = max(average_number_bodies1, average_number_bodies2)
+
+                        # calculating average number of faces in the room
+                        average_number_faces1 = round(sum(number_faces1)/len(number_faces1))
+                        average_number_faces2 = round(sum(number_faces2)/len(number_faces2)) 
+
+                        average_number_faces = max(average_number_faces1, average_number_faces2)
+
+                        # using either face number or body number, whichever is higher
+                        average_number_people = max(average_number_bodies, average_number_faces)
+
+                        # Resetting Buffers
                         number_bodies1 = []
                         number_bodies2 = []
 
+                        number_faces1 = []
+                        number_faces2 = []
+
                         # Number of people has changed and someone is inside the room    
-                        if (prev_average_number_bodies != average_number_bodies) and (average_number_bodies != 0):
-                            avg_num_bodies_changed = True
+                        if (prev_average_number_people != average_number_people) and (average_number_people != 0):
+                            average_number_people_changed = True
                             present_usernames = []
 
                         # No one is inside the room, resetting alles after exit delay
-                        if average_number_bodies == 0:
+                        if average_number_people == 0:
                             exit_delay_counter += 1
 
                         if exit_delay_counter > global_application_data['zero_person_detection_interval_delay']:
-                            avg_num_bodies_changed = False
+                            average_number_people_changed = False
                             present_usernames = []
                             guest_recheck_counter = 0
                             unknown_resident_present = False
@@ -713,18 +747,18 @@ def dashboard_page():
                             exit_delay_counter = 0
 
                         # Updating Tracker
-                        prev_average_number_bodies = average_number_bodies
+                        prev_average_number_people = average_number_people
 
                         # ------------- Logging for Debugging ---------------
-                        print('Avg # People: ', average_number_bodies)
+                        print('Avg # People: ', average_number_people)
                         print('Present Usernames: ', present_usernames)
                         
 
-                        if avg_num_bodies_changed: print('Avg # People Changed!')
+                        if average_number_people_changed: print('Avg # People Changed!')
                         if unknown_resident_present: print("Unknown Resident Present!")        
 
                     # ----------------- If number of people have changed, or if there is an unknown present ------------------
-                    if (avg_num_bodies_changed and frame_counter % global_application_data['frame_buffer_size'] == 0 
+                    if (average_number_people_changed and frame_counter % global_application_data['frame_buffer_size'] == 0 
                         or (unknown_resident_present
                         and frame_counter % global_application_data['frame_buffer_size'] == 0 
                         and guest_recheck_counter < global_application_data['guest_recheck_threshold'])):
@@ -738,20 +772,20 @@ def dashboard_page():
                         # Removing the unidentified usernames from the list
                         known_usernames_in_present_list = [username for username in unique_present_usernames if username != "Unknown"]
 
-                        if len(known_usernames_in_present_list) == average_number_bodies: 
+                        if len(known_usernames_in_present_list) == average_number_people: 
                             # --- Everyone has been identified ---
                             unique_present_usernames = known_usernames_in_present_list
                             unknown_resident_present = False
-                            avg_num_bodies_changed = False
+                            average_number_people_changed = False
                             exit_delay_counter = 0
             
-                        elif len(known_usernames_in_present_list) < average_number_bodies:
+                        elif len(known_usernames_in_present_list) < average_number_people:
                             # --- There is still people we do not know ---
                             unique_present_usernames = known_usernames_in_present_list
-                            while len(unique_present_usernames) < average_number_bodies:
+                            while len(unique_present_usernames) < average_number_people:
                                 unique_present_usernames.append('Unknown')
 
-                            avg_num_bodies_changed = False
+                            average_number_people_changed = False
                             unknown_resident_present = True
                             exit_delay_counter = 0
 
@@ -785,9 +819,10 @@ def dashboard_page():
             ui.button(toggle_button_text, on_click=lambda: toggle_application(), icon=toggle_button_icon).props('flat color=black')
 
         toggle_button_ui()
-        ui.button('Profile', on_click=lambda: update_profile_dialog.open(), icon='person').props('flat color=black')
 
         ui.space()
+        ui.button('Profile', on_click=lambda: update_profile_dialog.open(), icon='person').props('flat color=black')
+
         if global_logged_in_user.username == 'admin':
             ui.button('Settings', on_click=lambda: update_application_settings_dialog.open(), icon='settings').props('flat color=black')
 
@@ -797,8 +832,6 @@ def dashboard_page():
                 ui.notify('Application Stopped', color='green')
             else:
                 start_application()
-
-        actions_drawer.toggle()
 
     @ui.refreshable
     def dashboard_cards():
@@ -978,7 +1011,7 @@ def dashboard_page():
         
         with ui.element('div').classes('sm:columns-1 md:columns-2 lg:columns-2 w-full gap-2'):  
             with ui.label('Select Face Detection Confidence Threshold').props('style="color: gray;"').classes('mb-10'):
-                ui.tooltip('Confidence level for face detection, higher = stricter. User for persona registration and face recognition.')
+                ui.tooltip('Confidence level for face detection, higher = stricter. User for persona registration, face recognition and presence detection algorithm.')
             face_detection_confidence_level_input = ui.slider(min=0.1, max=1, step=0.05, value=global_application_data['face_detection_confidence_level']).classes('mb-5').props('label-always')
 
         with ui.element('div').classes('sm:columns-1 md:columns-2 lg:columns-2 w-full gap-2'):  
@@ -1382,11 +1415,13 @@ def cameras_page():
                 # Add a slot for the 'actions' column to display the delete button
                 table.add_slot('body-cell-actions', '''
                     <q-td key="actions" :props="props">
+                        <q-btn @click="$parent.$emit('open_video', props)" icon="monitor" flat dense/>
                         <q-btn @click="$parent.$emit('test_connection', props)" icon="wifi" flat dense/>
                         <q-btn @click="$parent.$emit('del', props)" icon="delete" flat dense/>
                     </q-td>
                 ''')
 
+                table.on('open_video', lambda props: ui.navigate.to('http://' + props.args['row']['ip_address'] + ':81'))
                 table.on('test_connection', lambda props: camera_is_connected_verbose(props.args['row']['ip_address']))
                 table.on('del', lambda props: handle_camera_delete(props.args['row']['name']))
             
