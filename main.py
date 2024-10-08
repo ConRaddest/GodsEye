@@ -63,7 +63,8 @@ global_webcam_debug_mode = False
 # Computer Vision Variables
 detect_bodies_confidence_level = 0
 global_background_application_thread = None
-global_add_persona_thread = None
+global_add_persona_webcam_thread = None
+global_add_persona_espcam_thread = None
 
 global_logged_in_user = None
 
@@ -256,7 +257,7 @@ def update_led_status(led_status, ip_address):
 
     # 1 -> Turn Lighting to Dim
     # 2 -> Turn Lighting to Normal
-    # 3 -> Turn Lighting to Bright/Bright
+    # 3 -> Turn Lighting to Bright
     
     url = f"http://{ip_address}/control?led={led_status}"
     try:
@@ -265,8 +266,6 @@ def update_led_status(led_status, ip_address):
             print(f"Error: Received response code {response.status_code}")
     except requests.exceptions.RequestException as e:
         print(f"Request failed: {e}")
-
-
 
 def handle_persona_add(face_encodings):
     global global_personas, global_logged_in_user, global_users
@@ -1076,7 +1075,7 @@ def personas_page():
             number_pictures_webcam_input = ui.slider(min=1, max=40, value=20).classes('mb-5 w-full').props('label-always')
 
             ui.label('Select Delay Between Pictures (seconds): ').classes('mb-2 font-semibold text-center').style('font-size: 15px;') 
-            delay_capture_seconds_webcam_input = ui.slider(min=0.1, max=2, value=0.5, step=0.1).classes('mb-5 w-full').props('label-always')
+            delay_capture_seconds_webcam_input = ui.slider(min=0.1, max=2, value=0.1, step=0.1).classes('mb-5 w-full').props('label-always')
 
             with ui.row().classes('justify-between items-center w-full'):
                 cancel_capture_button_webcam = ui.button('Cancel', on_click=lambda: add_persona_webcam_dialog.close(), color="gray").classes('w-1/3 m-0 text-white')
@@ -1093,7 +1092,7 @@ def personas_page():
             number_pictures_espcam_input = ui.slider(min=1, max=40, value=20).classes('mb-5 w-full').props('label-always')
 
             ui.label('Select Delay Between Pictures (seconds): ').classes('mb-2 font-semibold text-center').style('font-size: 15px;') 
-            delay_capture_seconds_espcam_input = ui.slider(min=0.1, max=2, value=0.5, step=0.1).classes('mb-5 w-full').props('label-always')
+            delay_capture_seconds_espcam_input = ui.slider(min=0.1, max=2, value=0.1, step=0.1).classes('mb-5 w-full').props('label-always')
 
             camera_options = [0]
             if len(global_cameras) > 0:            
@@ -1173,7 +1172,7 @@ def personas_page():
             handle_persona_add(encoded_faces)
             persona_table_ui.refresh()
 
-        async def capture_faces_espcam(number_pictures, delay_capture_seconds, ip_address):
+        async def capture_faces_espcam(number_pictures, delay_capture_seconds):
             global global_logged_in_user, global_add_persona_thread
 
             encoded_faces = []
@@ -1181,7 +1180,7 @@ def personas_page():
             progress = 0
             espcam_progress_bar.set_value(progress)
 
-            source = 'http://' + ip_address + ':81'
+            source = 'http://' + global_cameras[camera_select_index.value].ip_address + ':81'
             video = cv2.VideoCapture(source)  # Open the webcam
 
             esp_image_capture_dialog.open()
@@ -1201,6 +1200,8 @@ def personas_page():
                         face_location = [(y, x + w, y + h, x)]
                         encoded_face = face_recognition.face_encodings(frame, face_location)
 
+                        update_led_status(3, global_cameras[camera_select_index.value].ip_address)
+
                         print('Encoding a face... ')
                         encoded_faces.append(encoded_face)
                         frame_counter += 1
@@ -1208,6 +1209,8 @@ def personas_page():
                         espcam_progress_bar.set_value(progress)
 
                         await asyncio.sleep(delay_capture_seconds)  # Wait for the delay
+
+                        update_led_status(1, global_cameras[camera_select_index.value].ip_address)
 
             video.release()
     
@@ -1220,35 +1223,33 @@ def personas_page():
             handle_persona_add(encoded_faces)
             persona_table_ui.refresh()
 
-        def start_async_capture_faces_webcam():
-            asyncio.run(capture_faces_webcam(number_pictures_webcam_input.value, delay_capture_seconds_webcam_input.value))
-
-        def start_async_capture_faces_espcam(ip_address):
-            loop = asyncio.get_event_loop()
-            loop.create_task(capture_faces_espcam(number_pictures_espcam_input.value, delay_capture_seconds_espcam_input.value, ip_address))
+            update_led_status(global_application_data['preferred_lighting'], global_cameras[camera_select_index.value].ip_address)
         
-        def on_click_webcam_persona_add():
+        async def on_click_webcam_persona_add():
             global global_add_persona_thread
             start_capture_button_webcam.disable()
             cancel_capture_button_webcam.disable()
 
-            # Create a thread to run the asyncio loop
-            global_add_persona_thread = threading.Thread(target=start_async_capture_faces_webcam, daemon=True)
+            global_add_persona_thread = threading.Thread(
+                target=lambda: asyncio.run(capture_faces_webcam(number_pictures_espcam_input.value, delay_capture_seconds_espcam_input.value)),
+                daemon=True
+            )
             global_add_persona_thread.start()
         
-        def on_click_espcam_persona_add():
-            global global_cameras
-            ip_address = global_cameras[camera_select_index.value].ip_address
+        async def on_click_espcam_persona_add():
+            global global_add_persona_espcam_thread
 
-            if not camera_is_connected_verbose(ip_address):
+            if not camera_is_connected_verbose(global_cameras[camera_select_index.value].ip_address):
                 return
 
             cancel_capture_button_espcam.disable()
             start_capture_button_espcam.disable()
 
-            # Create a thread to run the asyncio loop
-            global_add_persona_thread = threading.Thread(target=start_async_capture_faces_espcam(ip_address), daemon=True)
-            global_add_persona_thread.start()
+            global_add_persona_espcam_thread = threading.Thread(
+                target=lambda: asyncio.run(capture_faces_espcam(number_pictures_espcam_input.value, delay_capture_seconds_espcam_input.value)),
+                daemon=True
+            )
+            global_add_persona_espcam_thread.start()
 
         def on_click_persona_add(registration_type):
             if registration_type == 'camera':
@@ -1576,5 +1577,5 @@ def residents():
     residents_page()
 
 # Start the UI
-ui.run(on_air=True)
+ui.run()
 
