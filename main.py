@@ -52,7 +52,7 @@ global_application_data = {
     'preferred_temperature': 20,
     'frame_buffer_size': 5,
     'guest_recheck_threshold': 10,
-    'zero_person_detection_interval_delay': 5,
+    'person_detection_delay_interval': 5,
     'body_detection_confidence_level': 0.4,
     'face_detection_confidence_level': 0.8,
 }
@@ -347,7 +347,7 @@ def handle_application_settings_update(application_data):
         'preferred_temperature': application_data['default_temperature_input'],
         'frame_buffer_size': application_data['frame_buffer_size_input'],
         'guest_recheck_threshold': application_data['guest_recheck_threshold_input'],
-        'zero_person_detection_interval_delay': application_data['zero_person_detection_interval_delay_input'],
+        'person_detection_delay_interval': application_data['zero_person_detection_interval_delay_input'],
         'body_detection_confidence_level': application_data['body_detection_confidence_level_input'],
         'face_detection_confidence_level': application_data['face_detection_confidence_level_input']
     }
@@ -549,251 +549,153 @@ def dashboard_page():
         for camera in global_cameras:
             ip_addresses.append(camera.ip_address)
 
-        # -------------- Single Camera Algorithm ---------------
-        if len(ip_addresses) == 1 or global_webcam_debug_mode:
-            # Counters
-            frame_counter = 0
-            guest_recheck_counter = 0
-            exit_delay_counter = 0
+        # -------------- Presence Detection Algorithm ---------------
+        # Counters
+        frame_counter = 0
+        guest_recheck_counter = 0
+        person_detection_delay_counter = 0
 
-            # Calculated Variables
-            number_bodies = []
-            number_faces = []
-            present_usernames = []
+        # Calculated Variables
+        number_bodies = [[] for _ in range(len(ip_addresses))]
+        number_faces = [[] for _ in range(len(ip_addresses))]
 
-            average_number_bodies = 0
-            average_number_faces = 0
+        average_number_bodies = 0
+        average_number_faces = 0
+        average_number_people = 0
+        prev_average_number_people = 0
+        present_usernames = []
 
-            average_number_people = 0
-            prev_average_number_people = 0
+        # Flags
+        need_face_update = False
+        average_number_people_changed = False
+        unknown_resident_present = False
 
-            # Flags
-            average_number_people_changed = False
-            unknown_resident_present = False
-            
-            if global_webcam_debug_mode:
-                url = 0
-            else:
-                url = 'http://' + ip_addresses[0] + ':81'
-            
-            video = cv2.VideoCapture(url)
+        # Initialize video capture for each camera
+        if global_webcam_debug_mode:
+            videos = [cv2.VideoCapture(0)]
+        else:
+            videos = [cv2.VideoCapture(f'http://{ip}:81') for ip in ip_addresses]
 
-            while global_application_is_running:
-                ret, frame = video.read()
-                if ret:
-                    frame_counter += 1
+        while global_application_is_running:
+            ret_frames = [video.read() for video in videos]
+            frames = [frame for ret, frame in ret_frames if ret]
+
+            if len(frames) == len(videos):  # Ensure all cameras have frames
+                frame_counter += 1
+
+                # Detect people and faces in each frame
+                for i, frame in enumerate(frames):
+                    number_bodies[i].append(detect_number_bodies(frame))
+                    number_faces[i].append(detect_number_faces(frame))
+                
+                if frame_counter % global_application_data['frame_buffer_size'] == 0:
+                    # Calculate the average number of bodies and faces per camera
+                    average_number_bodies_list = [
+                        round(sum(bodies) / len(bodies)) if bodies else 0
+                        for bodies in number_bodies
+                    ]
+                    average_number_faces_list = [
+                        round(sum(faces) / len(faces)) if faces else 0
+                        for faces in number_faces
+                    ]
                     
-                    # Detecting how many people and faces in the room
-                    number_bodies.append(detect_number_bodies(frame))
-                    number_faces.append(detect_number_faces(frame))
-                    
-                    if frame_counter % global_application_data['frame_buffer_size'] == 0:
-                        # Calculating average # people in the room
-                        average_number_bodies = round(sum(number_bodies)/len(number_bodies))
-                        average_number_faces = round(sum(number_faces)/len(number_faces))
+                    # Max of averages across all cameras
+                    average_number_bodies = max(average_number_bodies_list)
+                    average_number_faces = max(average_number_faces_list)
 
-                        average_number_people = max(average_number_bodies, average_number_faces)
+                    # Determine the higher count between body and face detection
+                    average_number_people = max(average_number_bodies, average_number_faces)
 
-                        # Resetting Buffers
-                        number_bodies = []
-                        number_faces = []
-                        
-                        # Number of people has changed and someone is inside the room    
-                        if (prev_average_number_people != average_number_people) and (average_number_people != 0):
-                            average_number_people_changed = True
-                            present_usernames = []
+                    # Reset Buffers
+                    number_bodies = [[] for _ in range(len(ip_addresses))]
+                    number_faces = [[] for _ in range(len(ip_addresses))]
 
-                        # No one is inside the room, resetting alles after exit delay
+                    # Else we need to use the delay to make application more reliable
+                    if prev_average_number_people != average_number_people:
+                        average_number_people_changed = True
+                        need_face_update = False
+
+                    # Incrementing the delay if avg people count changed
+                    if average_number_people_changed:
+                        person_detection_delay_counter += 1
+
+                    if person_detection_delay_counter >= global_application_data['person_detection_delay_interval']:
+                        # The room is empty, don't need to do anything
                         if average_number_people == 0:
-                            exit_delay_counter += 1
-
-                        # No one is inside the room, resetting alles
-                        if exit_delay_counter > global_application_data['zero_person_detection_interval_delay']:
-                            average_number_people_changed = False
-                            present_usernames = []
-                            guest_recheck_counter = 0
+                            need_face_update = False
                             unknown_resident_present = False
+                            average_number_people_changed = False
+
+                            guest_recheck_counter = 0
+                            person_detection_delay_counter = 0
+
+                            present_usernames = []
                             update_dashboard(present_usernames)
-                            exit_delay_counter = 0
+                        # the room isn't empty and we need to know who is inside
+                        else:
+                            need_face_update = True
+                            average_number_people_changed = False
 
-                        # Updating Tracker
-                        prev_average_number_people = average_number_people 
+                            person_detection_delay_counter = 0
+                            guest_recheck_counter = 0
 
-                        # ------------- Logging for Debugging ---------------
-                        print('Avg # People: ', average_number_people)
-                        print('Present Usernames: ', present_usernames)
+                            present_usernames = []
+                            update_dashboard(present_usernames)
 
-                        if average_number_people_changed: print('Avg # People Changed!')
-                        if unknown_resident_present: print("Unknown Resident Present!") 
+                    # Updating Tracker
+                    prev_average_number_people = average_number_people
 
-                    # ----------------- If number of people have changed, or if there is an unknown present ------------------
-                    if (average_number_people_changed and frame_counter % global_application_data['frame_buffer_size'] == 0 
-                        or (unknown_resident_present
-                        and frame_counter % global_application_data['frame_buffer_size'] == 0 
-                        and guest_recheck_counter < global_application_data['guest_recheck_threshold'])):
+                    # ------------- Logging for Debugging ---------------
+                    print('Avg # People: ', average_number_people)
+                    print('Present Usernames: ', present_usernames)
+                    
 
+                    if need_face_update: print('Avg # People Changed!')
+                    if unknown_resident_present: print("Unknown Resident Present!")        
+
+                # ----------------- If number of people have changed, or if there is an unknown present ------------------
+                if (need_face_update and frame_counter % global_application_data['frame_buffer_size'] == 0 
+                    or (unknown_resident_present
+                    and frame_counter % global_application_data['frame_buffer_size'] == 0 
+                    and guest_recheck_counter < global_application_data['guest_recheck_threshold'])):
+
+                    # Getting who can be seen in each frame for all cameras
+                    usernames_in_frames = []
+
+                    # Loop through each frame and recognise faces
+                    for frame in frames:
                         usernames_in_frame = recognise_faces(frame)
+                        usernames_in_frames.extend(usernames_in_frame)
 
-                        unique_present_usernames = list(set(present_usernames + usernames_in_frame))
-                        known_usernames_in_present_list = [username for username in unique_present_usernames if username != "Unknown"]
+                    # Extracting unique usernames from all frames
+                    unique_present_usernames = list(set(present_usernames + usernames_in_frames))
 
-                        if len(known_usernames_in_present_list) == average_number_people: 
-                            # --- Everyone has been identified ---
-                            unique_present_usernames = known_usernames_in_present_list
-                            unknown_resident_present = False
-                            average_number_people_changed = False
-                            exit_delay_counter = 0
-            
-                        elif len(known_usernames_in_present_list) < average_number_people:
-                            # --- There is still people we do not know ---
-                            unique_present_usernames = known_usernames_in_present_list
-                            while len(unique_present_usernames) < average_number_people:
-                                unique_present_usernames.append('Unknown')
+                    # Removing the unidentified usernames from the list
+                    known_usernames_in_present_list = [username for username in unique_present_usernames if username != "Unknown"]
 
-                            average_number_people_changed = False
-                            unknown_resident_present = True
-                            guest_recheck_counter += 1
-                            exit_delay_counter = 0
+                    if len(known_usernames_in_present_list) == average_number_people: 
+                        # --- Everyone has been identified ---
+                        unique_present_usernames = known_usernames_in_present_list
+                        unknown_resident_present = False
+                        need_face_update = False
+                        person_detection_delay_counter = 0
+        
+                    elif len(known_usernames_in_present_list) < average_number_people:
+                        # --- There is still people we do not know ---
+                        unique_present_usernames = known_usernames_in_present_list
+                        while len(unique_present_usernames) < average_number_people:
+                            unique_present_usernames.append('Unknown')
 
-                            print('# Guest Rechecks: ', guest_recheck_counter)
+                        need_face_update = False
+                        unknown_resident_present = True
+                        person_detection_delay_counter = 0
 
-                        present_usernames = unique_present_usernames
-                        update_dashboard(unique_present_usernames)
+                        guest_recheck_counter += 1
 
-        # -------------- Dual Camera Algorithm ---------------
-        if len(ip_addresses) == 2:
-            # Counter
-            frame_counter = 0
-            guest_recheck_counter = 0
-            exit_delay_counter = 0
+                        print('# Guest Rechecks: ', guest_recheck_counter)
 
-            # Calculated Variables
-            number_bodies1 = []
-            number_bodies2 = []
-
-            number_faces1 = []
-            number_faces2 = []
-
-            average_number_bodies = 0
-            average_number_faces = 0
-
-            average_number_people = 0
-
-            present_usernames = []
-
-            average_number_people = 0
-            prev_average_number_people = 0
-
-            # Flags
-            average_number_people_changed = False
-            unknown_resident_present = False
-
-            video1 = cv2.VideoCapture('http://' + ip_addresses[0] + ':81')
-            video2 = cv2.VideoCapture('http://' + ip_addresses[1] + ':81')
-
-            while global_application_is_running:
-                # Assuming two cameras per room, need to implement second camera
-                ret1, frame1 = video1.read()
-                ret2, frame2 = video2.read()
-
-                if ret1 and ret2:
-                    frame_counter += 1
-                    # Detecting how many people are in the room
-                    number_bodies1.append(detect_number_bodies(frame1))
-                    number_bodies2.append(detect_number_bodies(frame2))
-
-                    number_faces1.append(detect_number_faces(frame1))
-                    number_faces2.append(detect_number_faces(frame2))
-                    
-                    if frame_counter % global_application_data['frame_buffer_size'] == 0:
-                        # calculating average number of bodies in the room
-                        average_number_bodies1 = round(sum(number_bodies1)/len(number_bodies1))
-                        average_number_bodies2 = round(sum(number_bodies1)/len(number_bodies1)) 
-
-                        average_number_bodies = max(average_number_bodies1, average_number_bodies2)
-
-                        # calculating average number of faces in the room
-                        average_number_faces1 = round(sum(number_faces1)/len(number_faces1))
-                        average_number_faces2 = round(sum(number_faces2)/len(number_faces2)) 
-
-                        average_number_faces = max(average_number_faces1, average_number_faces2)
-
-                        # using either face number or body number, whichever is higher
-                        average_number_people = max(average_number_bodies, average_number_faces)
-
-                        # Resetting Buffers
-                        number_bodies1 = []
-                        number_bodies2 = []
-
-                        number_faces1 = []
-                        number_faces2 = []
-
-                        # Number of people has changed and someone is inside the room    
-                        if (prev_average_number_people != average_number_people) and (average_number_people != 0):
-                            average_number_people_changed = True
-                            present_usernames = []
-
-                        # No one is inside the room, resetting alles after exit delay
-                        if average_number_people == 0:
-                            exit_delay_counter += 1
-
-                        if exit_delay_counter > global_application_data['zero_person_detection_interval_delay']:
-                            average_number_people_changed = False
-                            present_usernames = []
-                            guest_recheck_counter = 0
-                            unknown_resident_present = False
-                            update_dashboard(present_usernames)
-                            exit_delay_counter = 0
-
-                        # Updating Tracker
-                        prev_average_number_people = average_number_people
-
-                        # ------------- Logging for Debugging ---------------
-                        print('Avg # People: ', average_number_people)
-                        print('Present Usernames: ', present_usernames)
-                        
-
-                        if average_number_people_changed: print('Avg # People Changed!')
-                        if unknown_resident_present: print("Unknown Resident Present!")        
-
-                    # ----------------- If number of people have changed, or if there is an unknown present ------------------
-                    if (average_number_people_changed and frame_counter % global_application_data['frame_buffer_size'] == 0 
-                        or (unknown_resident_present
-                        and frame_counter % global_application_data['frame_buffer_size'] == 0 
-                        and guest_recheck_counter < global_application_data['guest_recheck_threshold'])):
-
-                        # Getting who can be seen in each frame
-                        usernames_in_frame1 = recognise_faces(frame1)
-                        usernames_in_frame2 = recognise_faces(frame2)
-
-                        # Extracting unique usernames from those two lists
-                        unique_present_usernames = list(set(present_usernames + usernames_in_frame1 + usernames_in_frame2))
-                        # Removing the unidentified usernames from the list
-                        known_usernames_in_present_list = [username for username in unique_present_usernames if username != "Unknown"]
-
-                        if len(known_usernames_in_present_list) == average_number_people: 
-                            # --- Everyone has been identified ---
-                            unique_present_usernames = known_usernames_in_present_list
-                            unknown_resident_present = False
-                            average_number_people_changed = False
-                            exit_delay_counter = 0
-            
-                        elif len(known_usernames_in_present_list) < average_number_people:
-                            # --- There is still people we do not know ---
-                            unique_present_usernames = known_usernames_in_present_list
-                            while len(unique_present_usernames) < average_number_people:
-                                unique_present_usernames.append('Unknown')
-
-                            average_number_people_changed = False
-                            unknown_resident_present = True
-                            exit_delay_counter = 0
-
-                            guest_recheck_counter += 1
-
-                            print('# Guest Rechecks: ', guest_recheck_counter)
-
-                        present_usernames = unique_present_usernames
-                        update_dashboard(unique_present_usernames)
+                    present_usernames = unique_present_usernames
+                    update_dashboard(unique_present_usernames)
                 
     with ui.left_drawer(bottom_corner=True).style('background-color: #d7e3f4;') as menu_drawer:
         ui.button('Dashboard', on_click=lambda: ui.navigate.to('/dashboard'), icon='dashboard').style('font-size: 15px;').props('flat color=black')
@@ -999,9 +901,9 @@ def dashboard_page():
             guest_recheck_threshold_input = ui.slider(min=1, max=20, value=global_application_data['guest_recheck_threshold']).classes('mb-5').props('label-always')
         
         with ui.element('div').classes('sm:columns-1 md:columns-2 lg:columns-2 w-full gap-2'):
-            with ui.label('Zero Person Detection Delay Interval').props('style="color: gray;"').classes('mb-10'):
-                ui.tooltip('Number of frame buffer intervals before the room is deemed empty.')
-            zero_person_detection_interval_delay_input = ui.slider(min=1, max=10, value=global_application_data['zero_person_detection_interval_delay']).classes('mb-5').props('label-always')
+            with ui.label('Person Detection Delay Interval').props('style="color: gray;"').classes('mb-10'):
+                ui.tooltip('Number of frame buffer intervals before the room is deemed to have a change in occupancy, higher values leads to more delay between recognition but a more stable system.')
+            zero_person_detection_interval_delay_input = ui.slider(min=1, max=10, value=global_application_data['person_detection_delay_interval']).classes('mb-5').props('label-always')
             
         with ui.element('div').classes('sm:columns-1 md:columns-2 lg:columns-2 w-full gap-2'):  
             with ui.label('Select Body Detection Confidence Threshold').props('style="color: gray;"').classes('mb-10'):
