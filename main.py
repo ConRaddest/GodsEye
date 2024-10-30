@@ -11,6 +11,7 @@ import requests
 from ultralytics import YOLO
 from cvzone import FaceDetectionModule
 from collections import Counter
+from datetime import timedelta
 import os
 
 face_detector = FaceDetectionModule.FaceDetector()
@@ -208,7 +209,7 @@ def recognise_faces(frame):
         return []
     
     input_face_encodings = face_recognition.face_encodings(frame, input_face_locations[0])
-
+    
     # Loop through the encodings in the frame
     for unknown_encoding in input_face_encodings:
         # Compare the unknown face to all known face encodings in one go
@@ -220,11 +221,8 @@ def recognise_faces(frame):
         if votes:
             # Get the most common username from the matches
             best_match_username = votes.most_common(1)[0][0]
-        else:
-            best_match_username = "Unknown"
+            usernames.append(best_match_username)
 
-        # Append the identified username to the list
-        usernames.append(best_match_username)
     return usernames
 
 # Returns the visible number of bodies
@@ -480,19 +478,20 @@ def dashboard_page():
         asyncio.run(main_application())
 
     def start_application():
-        if len(global_personas) == 0: 
-            ui.notify('No Personas Added', color='red')
-            return
-        
-        # Checking if we have cameras
-        if len(global_cameras) == 0 and not global_webcam_debug_mode: 
-            ui.notify('No Cameras Added', color='red')
-            return
-        
-        # Checking if all cameras are correctly setup and connected
-        for camera in global_cameras:
-            if not camera_is_connected_verbose(camera.ip_address):
+        if not global_webcam_debug_mode:
+            if len(global_personas) == 0: 
+                ui.notify('No Personas Added', color='red')
                 return
+            
+            # Checking if we have cameras
+            if len(global_cameras) == 0: 
+                ui.notify('No Cameras Added', color='red')
+                return
+            
+            # Checking if all cameras are correctly setup and connected
+            for camera in global_cameras:
+                if not camera_is_connected_verbose(camera.ip_address):
+                    return
 
         global global_application_is_running
         global global_background_application_thread
@@ -525,6 +524,21 @@ def dashboard_page():
         global global_present_users, global_current_lighting, global_current_temperature, global_application_data
 
         global_present_users = [user for user in global_users if user.username in present_usernames]
+
+        unknown_counter = 1
+            
+        if 'Unknown' in present_usernames:
+            while len(global_present_users) < len(present_usernames):
+                global_present_users.append(User(
+                    username='Unknown',
+                    name='Unknown',
+                    surname='User ' + str(unknown_counter),
+                    password='123',
+                    preferred_lighting=global_application_data['preferred_lighting'],
+                    preferred_temp=global_application_data['preferred_temperature'],
+                    priority=0,
+                ))
+                unknown_counter += 1
         
         if len(global_present_users) > 0:
             global_present_users.sort(key=lambda user: user.priority, reverse=True)
@@ -534,11 +548,13 @@ def dashboard_page():
             update_led_status_all(global_current_lighting)
 
         else: 
-            # there's no one we know so setting to default values
+            # there's no one so setting to default values
             global_current_lighting = global_application_data['preferred_lighting']
             global_current_temperature = global_application_data['preferred_temperature']
 
             update_led_status_all(global_current_lighting)
+
+        
 
         dashboard_cards.refresh()
 
@@ -552,7 +568,9 @@ def dashboard_page():
         # -------------- Presence Detection Algorithm ---------------
         # Counters
         frame_counter = 0
-        guest_recheck_counter = 0
+        #guest_recheck_counter = 0
+        successful_face_recognition_counter = 0
+        face_recognition_counter = 0
         person_detection_delay_counter = 0
 
         # Calculated Variables
@@ -561,9 +579,19 @@ def dashboard_page():
 
         average_number_bodies = 0
         average_number_faces = 0
+
+        mean_average_number_bodies = []
+        mean_average_number_faces = []
+        mean_average_number_people = []
+
+        number_residents = []
+        number_unknowns = []
+
         average_number_people = 0
         prev_average_number_people = 0
+
         present_usernames = []
+        known_usernames_in_present_list = []
 
         # Flags
         need_face_update = False
@@ -575,6 +603,8 @@ def dashboard_page():
             videos = [cv2.VideoCapture(0)]
         else:
             videos = [cv2.VideoCapture(f'http://{ip}:81') for ip in ip_addresses]
+
+        start_time = time.time()
 
         while global_application_is_running:
             ret_frames = [video.read() for video in videos]
@@ -606,18 +636,33 @@ def dashboard_page():
                     # Determine the higher count between body and face detection
                     average_number_people = max(average_number_bodies, average_number_faces)
 
+                    mean_average_number_bodies.append(average_number_bodies)
+                    mean_average_number_faces.append(average_number_faces)
+                    mean_average_number_people.append(average_number_people)
+
                     # Reset Buffers
                     number_bodies = [[] for _ in range(len(ip_addresses))]
                     number_faces = [[] for _ in range(len(ip_addresses))]
 
-                    # Else we need to use the delay to make application more reliable
+
                     if prev_average_number_people != average_number_people:
                         average_number_people_changed = True
                         need_face_update = False
 
+                        # Updating immediately if this is the first person in the room
+                        if prev_average_number_people == 0:
+                            person_detection_delay_counter = global_application_data['person_detection_delay_interval']
+
+                        # Flashing for number of people 
+                        for _ in range(average_number_people):
+                            update_led_status_all(0)
+                            update_led_status_all(-1)
+
                     # Incrementing the delay if avg people count changed
                     if average_number_people_changed:
                         person_detection_delay_counter += 1
+
+                    print(f"==>> average_number_people: {average_number_people}")
 
                     if person_detection_delay_counter >= global_application_data['person_detection_delay_interval']:
                         # The room is empty, don't need to do anything
@@ -626,7 +671,7 @@ def dashboard_page():
                             unknown_resident_present = False
                             average_number_people_changed = False
 
-                            guest_recheck_counter = 0
+                            #guest_recheck_counter = 0
                             person_detection_delay_counter = 0
 
                             present_usernames = []
@@ -637,27 +682,16 @@ def dashboard_page():
                             average_number_people_changed = False
 
                             person_detection_delay_counter = 0
-                            guest_recheck_counter = 0
+                            #guest_recheck_counter = 0
 
                             present_usernames = []
                             update_dashboard(present_usernames)
 
                     # Updating Tracker
-                    prev_average_number_people = average_number_people
-
-                    # ------------- Logging for Debugging ---------------
-                    print('Avg # People: ', average_number_people)
-                    print('Present Usernames: ', present_usernames)
-                    
-
-                    if need_face_update: print('Avg # People Changed!')
-                    if unknown_resident_present: print("Unknown Resident Present!")        
+                    prev_average_number_people = average_number_people   
 
                 # ----------------- If number of people have changed, or if there is an unknown present ------------------
-                if (need_face_update and frame_counter % global_application_data['frame_buffer_size'] == 0 
-                    or (unknown_resident_present
-                    and frame_counter % global_application_data['frame_buffer_size'] == 0 
-                    and guest_recheck_counter < global_application_data['guest_recheck_threshold'])):
+                if ((need_face_update or unknown_resident_present) and frame_counter % global_application_data['frame_buffer_size'] == 0):
 
                     # Getting who can be seen in each frame for all cameras
                     usernames_in_frames = []
@@ -665,6 +699,9 @@ def dashboard_page():
                     # Loop through each frame and recognise faces
                     for frame in frames:
                         usernames_in_frame = recognise_faces(frame)
+                        face_recognition_counter += 1
+                        if len(usernames_in_frame) > 0:
+                            successful_face_recognition_counter += 1
                         usernames_in_frames.extend(usernames_in_frame)
 
                     # Extracting unique usernames from all frames
@@ -683,20 +720,87 @@ def dashboard_page():
                     elif len(known_usernames_in_present_list) < average_number_people:
                         # --- There is still people we do not know ---
                         unique_present_usernames = known_usernames_in_present_list
+                        
                         while len(unique_present_usernames) < average_number_people:
                             unique_present_usernames.append('Unknown')
-
+                        
                         need_face_update = False
                         unknown_resident_present = True
                         person_detection_delay_counter = 0
 
-                        guest_recheck_counter += 1
-
-                        print('# Guest Rechecks: ', guest_recheck_counter)
+                        # guest_recheck_counter += 1
 
                     present_usernames = unique_present_usernames
-                    update_dashboard(unique_present_usernames)
+                    update_dashboard(present_usernames)
+
+                if frame_counter % global_application_data['frame_buffer_size']:
+                    # Updating trackers for result validations
+                    known_counter = 0
+                    unknown_counter = 0
+                    
+                    for username in present_usernames:
+                        if username == 'Unknown':
+                            unknown_counter += 1
+                        else:
+                            known_counter += 1
+
+                    number_residents.append(known_counter)
+                    number_unknowns.append(unknown_counter)
                 
+        end_time = time.time()
+        session_duration_seconds = round(end_time - start_time, 0)
+        session_duration_formatted = timedelta(seconds=session_duration_seconds)
+
+        average_session_bodies = 0
+        average_session_faces = 0
+        average_session_people = 0
+        average_sessions_residents = 0
+        average_session_unknowns = 0
+
+        if len(mean_average_number_bodies) != 0: average_session_bodies = sum(mean_average_number_bodies)/len(mean_average_number_bodies)
+        if len(mean_average_number_faces) != 0: average_session_faces = sum(mean_average_number_faces)/len(mean_average_number_faces)
+        if len(mean_average_number_people) != 0: average_session_people = sum(mean_average_number_people)/len(mean_average_number_people)
+
+        
+        if len(number_residents) != 0: average_sessions_residents = sum(number_residents)/len(number_residents)
+        if len(number_unknowns) != 0: average_session_unknowns = sum(number_unknowns)/len(number_unknowns)
+
+        
+        print('----------------- Session Statistics -----------------')
+
+        print('\n')
+
+        print('------- Application Information -------')
+        print('Frame Buffer Size ---> ', global_application_data['frame_buffer_size'], 'Frames')
+        print('Guest Recheck Threshold ---> ', global_application_data['guest_recheck_threshold'], 'Rechecks')
+        print('Person Detection Delay Interval ---> ', global_application_data['person_detection_delay_interval'], 'Frame Buffers')
+        print('Body Detection Confidence Threshold ---> ', global_application_data['body_detection_confidence_level'])
+        print('Face Detection Confidence Threshold ---> ', global_application_data['face_detection_confidence_level'])
+
+        print('\n')
+
+        print('------- Capture Information -------')
+        print('Session Duration ---> ', session_duration_formatted, 's')
+        print('Frames Captured ---> ', frame_counter, 'Frames')
+        print('Average FPS --->', round(frame_counter / session_duration_seconds, 2), 'FPS')
+
+        print('\n')
+
+        print('------- Occupancy Information -------')
+        print('Average Session Bodies ---> ', round(average_session_bodies, 4))
+        print('Average Session Faces ---> ', round(average_session_faces, 4))
+        print('Average Session People ---> ', round(average_session_people, 4))
+
+        print('\n')
+
+        print('------- Facial Recogition Information -------')
+        print('Average Session Residents ---> ', round(average_sessions_residents, 4))
+        print('Average Session Unknowns ---> ', round(average_session_unknowns, 4))
+        print("".center(50, "-"))
+        print('Facial Recognition Success Ratio ---> ', round(successful_face_recognition_counter/face_recognition_counter, 2))
+        print('Attempted Facial Recognition Attempts ---> ', face_recognition_counter)
+        print('Successful Facial Recognition Attempts ---> ', successful_face_recognition_counter)
+
     with ui.left_drawer(bottom_corner=True).style('background-color: #d7e3f4;') as menu_drawer:
         ui.button('Dashboard', on_click=lambda: ui.navigate.to('/dashboard'), icon='dashboard').style('font-size: 15px;').props('flat color=black')
         ui.button('Personas', on_click=lambda: ui.navigate.to('/personas'), icon='face').style('font-size: 15px;').props('flat color=black')
@@ -724,8 +828,7 @@ def dashboard_page():
         ui.space()
         ui.button('Profile', on_click=lambda: update_profile_dialog.open(), icon='person').props('flat color=black')
 
-        if global_logged_in_user.username == 'admin':
-            ui.button('Settings', on_click=lambda: update_application_settings_dialog.open(), icon='settings').props('flat color=black')
+        ui.button('Settings', on_click=lambda: update_application_settings_dialog.open(), icon='settings').props('flat color=black')
 
         def toggle_application():
             if global_application_is_running:
@@ -1020,8 +1123,6 @@ def personas_page():
                 espcam_progress_bar = ui.linear_progress(value=0, show_value=False)
         
         async def capture_faces_webcam(number_pictures, delay_capture_seconds):
-            global global_logged_in_user, global_add_persona_thread
-
             encoded_faces = []
 
             frame_counter = 0
@@ -1055,7 +1156,6 @@ def personas_page():
                         face_location = [(y, x + w, y + h, x)]
                         encoded_face = face_recognition.face_encodings(frame, face_location)
 
-                        print('Encoding a face... ')
                         encoded_faces.append(encoded_face)
                         frame_counter += 1
                         progress = frame_counter / number_pictures
@@ -1104,7 +1204,6 @@ def personas_page():
 
                         update_led_status(3, global_cameras[camera_select_index.value].ip_address)
 
-                        print('Encoding a face... ')
                         encoded_faces.append(encoded_face)
                         frame_counter += 1
                         progress = frame_counter / number_pictures

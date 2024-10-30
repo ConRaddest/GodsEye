@@ -1,5 +1,5 @@
-#define WIFI_SSID "The Falling Fig_Ext1"
-#define WIFI_PASS "Th3F@ll1ngF1g"
+#define WIFI_SSID "Galaxy A53 5G CEEF"
+#define WIFI_PASS "fbyr2687"
 #define HOSTNAME  "esp32cam"
 
 #include <WebServer.h>
@@ -80,53 +80,6 @@ void handleTestConnection() {
     server.send(200, "text/plain", "OK");
 }
 
-// Function to display a two-digit number using LED1 (tens) and LED2 (units)
-void displayIPAddress() {
-  String mjpegAddress = mjpeg.address();  // Get the full MJPEG address (e.g., "http://192.168.0.107:81")
-  
-  // Find the start and end of the IP address section
-  int startIdx = mjpegAddress.indexOf("://") + 3; // Move past "http://"
-  int endIdx = mjpegAddress.indexOf(':', startIdx); // Locate the ':' before the port number
-  
-  // Extract the IP address part from the MJPEG address
-  String ipAddress = mjpegAddress.substring(startIdx, endIdx); // e.g., "192.168.0.107"
-  
-  // Extract the substring after the last dot, representing the last three digits
-  int lastThreeDigits = ipAddress.substring(ipAddress.lastIndexOf('.') + 1).toInt(); // e.g., "107"
-
-  int hundreds = lastThreeDigits / 100;            // Extract the hundreds digit
-  int tens = (lastThreeDigits / 10) % 10;          // Extract the tens digit
-  int units = lastThreeDigits % 10;                // Extract the units digit
-
-  // Flash LED1 for the tens digit
-  for (int i = 0; i < hundreds; i++) {
-    digitalWrite(12, HIGH); // Turn on LED1
-    delay(300);
-    digitalWrite(12, LOW);  // Turn off LED1
-    delay(300);
-  }
-
-  delay(500); // Pause between tens and units
-
-  // Flash LED2 for the units digit
-  for (int i = 0; i < tens; i++) {
-    digitalWrite(13, HIGH); // Turn on LED2
-    delay(300);
-    digitalWrite(13, LOW);  // Turn off LED2
-    delay(300);
-  }
-
-  delay(500); // Pause between tens and units
-
-  // Flash LED2 for the units digit
-  for (int i = 0; i < units; i++) {
-    digitalWrite(15, HIGH); // Turn on LED2
-    delay(300);
-    digitalWrite(15, LOW);  // Turn off LED2
-    delay(300);
-  }
-}
-
 void setup() {
   delay(3000);
   Serial.begin(115200);
@@ -174,13 +127,6 @@ void setup() {
   Serial.println("WiFi OK");
   Serial.println("MjpegStream OK");
   Serial.println(mjpeg.address());
-
-  displayIPAddress();
-  delay(1000);
-  displayIPAddress();
-  delay(1000);
-  displayIPAddress();
-  delay(1000);
 
 }
 
